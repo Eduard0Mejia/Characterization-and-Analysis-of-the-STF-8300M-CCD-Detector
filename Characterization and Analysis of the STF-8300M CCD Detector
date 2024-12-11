@@ -1,0 +1,474 @@
+
+# =============================================================================
+# Packages
+# =============================================================================
+from astropy.io import fits
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score
+
+# Path to the folder containing the FITS files
+#folder_path = "Path/"
+
+folder_path = "ADD THE FOLDER PATH"
+
+# List of files in the folder
+fits_files = [f for f in os.listdir(folder_path) if f.endswith('.FIT')]
+
+# Load a FITS file to visualize
+file_path = os.path.join(folder_path, fits_files[0])
+hdul = fits.open(file_path)  # Open the FITS file
+
+# %%
+# =============================================================================
+# Display .FIT Images
+# =============================================================================
+
+if len(fits_files) > 1:
+    # Load a FITS file to visualize
+    file = fits_files[0]
+    file_path = os.path.join(folder_path, file)
+    hdul = fits.open(file_path)  # Open the FITS file
+
+    # Display information about the FITS file
+    print(hdul.info())
+
+    # Extract the image data
+    data = hdul[0].data
+
+    # Visualize the image
+    plt.figure(figsize=(8, 8))
+    plt.imshow(data, cmap='gray', origin='lower')
+    plt.colorbar()
+    plt.title(f"Visualization of {file}")
+    plt.show()
+
+    # Close the FITS file
+    hdul.close()
+else:
+    print(f"The \"fits_files\" list is empty.\n")
+
+
+
+# %%
+
+# =============================================================================
+# Step 1: Visualization and Basic Statistics of Dark Frames
+# =============================================================================
+
+# The next step is to analyze the Dark Frames
+# to characterize thermal noise. This includes calculating basic
+# statistics and relevant visualizations.
+
+# Calculate basic statistics of the data:
+
+mean_value = np.mean(data)
+standard_deviation = np.std(data)
+maximum = np.max(data)
+minimum = np.min(data)
+
+print(f"Mean pixel value: {mean_value}")
+print(f"Standard deviation: {standard_deviation}")
+print(f"Maximum value: {maximum}")
+print(f"Minimum value: {minimum}")
+
+# Visualize the histogram of pixel values
+plt.figure(figsize=(8, 6))
+plt.hist(data.flatten(), bins=50, color='blue', alpha=0.7, log=True)
+plt.title("Histogram of pixel values (Dark Frame)")
+plt.xlabel("Pixel signal [ADU]")
+plt.ylabel("Number of pixels")
+plt.grid()
+plt.savefig('histogram.pdf')
+
+
+
+# =============================================================================
+# Calculation of Readout Noise (using only the bias frames)
+# =============================================================================
+
+bias1 = fits_files[0]
+bias2 = fits_files[1]
+with fits.open(os.path.join(folder_path, bias1)) as hdul:
+    bias_frame1 = hdul[0].data.astype(np.float64)
+    bias_frame1 = bias_frame1[135:2552, :]
+    exptime1 = hdul[0].header.get('EXPTIME', None)
+
+with fits.open(os.path.join(folder_path, bias2)) as hdul:
+    bias_frame2 = hdul[0].data.astype(np.float64)
+    bias_frame2 = bias_frame2[135:2552, :]
+    exptime2 = hdul[0].header.get('EXPTIME', None)
+print(exptime1, exptime2)
+
+bias_difference = bias_frame1 - bias_frame2
+#deviation_per_pixel = np.zeros((np.shape(bias_difference)))
+sum_squared_diff = np.sum((bias_difference - np.mean(bias_difference)) ** 2)
+deviation = np.sqrt(sum_squared_diff / (np.shape(bias_difference)[0] * np.shape(bias_difference)[1]))
+readout_noise = deviation * 0.38 / np.sqrt(2)
+print(readout_noise)
+
+
+
+# =============================================================================
+# Creation of the Average Bias
+# =============================================================================
+
+bias_frames = []
+bias_indices = []
+for file, index in zip(fits_files, range(len(fits_files))):
+    file_path = os.path.join(folder_path, file)
+    with fits.open(file_path) as hdul:
+        data = hdul[0].data
+        data = data[135:2552, :]
+        exptime = hdul[0].header.get('EXPTIME', None)
+        if exptime is not None and exptime < 0.5:  # Corrected comparison
+            bias_frames.append(data)
+            bias_indices.append(index)
+print(bias_frames)
+
+# Calculate the average
+if bias_frames:  # Check if the list is not empty
+    average_bias = np.mean(bias_frames, axis=0)
+    # Save the average in a new FITS file
+    hdu = fits.PrimaryHDU(average_bias)
+    hdu.writeto(folder_path + '/average_bias.fits', overwrite=True)
+    print("Average bias calculated and saved.")
+else:
+    print("No valid bias frames were found.")
+
+average_file = "average_bias.fits"
+
+fits_files = [fits_files[i] for i in range(len(fits_files)) if i not in bias_indices]
+
+print(len(fits_files))
+print(fits_files)
+
+# %%
+
+# =============================================================================
+# Step 2: Combined Analysis of Multiple Dark Frames
+# =============================================================================
+
+# Create a list to store the data from each file
+all_data = []
+
+# Process all FITS files in the folder
+for file in fits_files:
+    file_path = os.path.join(folder_path, file)
+    with fits.open(file_path) as hdul:
+        data = hdul[0].data
+        all_data.append(data)
+
+# Convert the list into a NumPy array
+all_data = np.array(all_data)
+
+# Calculate the combined mean and standard deviation
+combined_mean_per_pixel = np.mean(all_data, axis=0)
+combined_std_per_pixel = np.std(all_data, axis=0)
+
+deviation_per_pixel = np.zeros((np.shape(all_data[0])))
+for data in all_data:
+    deviation_per_pixel += (data - np.mean(data)) ** 2
+deviation_per_pixel = np.sqrt(deviation_per_pixel / np.shape(all_data)[0])
+
+# Adjust the dynamic range of the combined mean for better visualization
+plt.figure(figsize=(8, 6))
+plt.imshow(
+    combined_mean_per_pixel, 
+    cmap='gray', 
+    origin='lower', 
+    vmin=np.min(combined_mean_per_pixel), 
+    vmax=np.percentile(combined_mean_per_pixel, 99)
+)
+colorbar = plt.colorbar(fraction=0.04)
+colorbar.set_label('ADU', fontsize=12)
+plt.title("Pixel-wise Mean of Dark Frames")
+plt.xlabel("Pixels", fontsize=12)
+plt.ylabel("Pixels", fontsize=12)
+plt.savefig('combined_mean.pdf')
+#plt.show()
+
+# Adjust the dynamic range of the combined standard deviation for better visualization
+plt.figure(figsize=(8, 6))
+plt.imshow(
+    deviation_per_pixel, 
+    cmap='gray', 
+    origin='lower', 
+    vmin=0, 
+    vmax=np.percentile(deviation_per_pixel, 99)
+)
+colorbar = plt.colorbar(fraction=0.04)
+colorbar.set_label('ADU', fontsize=12)
+plt.title("Pixel-wise Standard Deviation of Dark Frames")
+plt.xlabel("Pixels", fontsize=12)
+plt.ylabel("Pixels", fontsize=12)
+plt.savefig('combined_std.pdf')
+#plt.show()
+
+# %%
+# =============================================================================
+# Step 2b: Detection of Overscan Start
+# =============================================================================
+
+for band_index in range(0, np.shape(deviation_per_pixel)[0]):
+    band_std = np.mean(deviation_per_pixel[band_index, :])
+
+    if band_std < 100:
+        print(band_index)  # Result: 131
+        break
+    
+# %%
+# =============================================================================
+# Step 2': Combined Analysis of Multiple Dark Frames (without overscan)
+# =============================================================================
+
+print(fits_files)
+# Process all FITS files in the folder
+all_data = []
+for file in fits_files:
+    file_path = os.path.join(folder_path, file)
+    with fits.open(file_path) as hdul:
+        data = hdul[0].data
+        data = data[135:2552, :]
+        data = data - average_bias
+        #print(f"{np.shape(data)} and {np.shape(average_bias)}")
+        all_data.append(data)
+
+# Convert the list into a NumPy array
+all_data = np.array(all_data)
+
+# Calculate the combined mean and standard deviation
+combined_mean_per_pixel = np.mean(all_data, axis=0)
+combined_std_per_pixel = np.std(all_data, axis=0)
+
+deviation_per_pixel = np.zeros((np.shape(all_data[0])))
+for data in all_data:
+    deviation_per_pixel += (data - np.mean(data)) ** 2
+deviation_per_pixel = np.sqrt(deviation_per_pixel / np.shape(all_data)[0])
+
+# %%
+
+
+# =============================================================================
+# Step 3: Identify Defective Pixels
+# =============================================================================
+
+# Now we will identify pixels with anomalous behaviors (such as “hot pixels”
+# or “dead pixels”). This is done by identifying values that deviate significantly
+# from the mean or have very high standard deviations.
+
+# Thresholds to identify defective pixels
+high_threshold = np.percentile(combined_mean_per_pixel, 99)  # Very high values
+low_threshold = np.percentile(combined_mean_per_pixel, 1)    # Very low values
+
+# Identify defective pixels
+hot_pixels = combined_mean_per_pixel > high_threshold
+dead_pixels = combined_mean_per_pixel < low_threshold
+
+print(f"Number of hot pixels: {np.sum(hot_pixels)}")
+print(f"Number of dead pixels: {np.sum(dead_pixels)}")
+
+# Visualize defective pixels
+plt.figure(figsize=(8, 8))
+plt.imshow(hot_pixels, cmap='Reds', origin='lower')
+plt.title("Hot Pixels")
+plt.xlabel("Pixels", fontsize=12)
+plt.ylabel("Pixels", fontsize=12)
+plt.colorbar()
+plt.show()
+
+plt.figure(figsize=(8, 8))
+plt.imshow(dead_pixels, cmap='Blues', origin='lower')
+plt.title("Dead Pixels")
+plt.xlabel("Pixels", fontsize=12)
+plt.ylabel("Pixels", fontsize=12)
+plt.colorbar()
+plt.show()
+
+# %%
+
+# =============================================================================
+# Step 4: Exposure Times
+# =============================================================================
+
+# Now we will focus on the analysis of the detector's linearity. For this,
+# we need to determine if the Dark Frames include different exposure times.
+
+# Check the exposure time in the FITS headers
+exposure_times = []
+low_exposure_files = []
+for file in fits_files:
+    file_path = os.path.join(folder_path, file)
+    with fits.open(file_path) as hdul:
+        exptime = hdul[0].header.get('EXPTIME', None)
+        if exptime is not None:
+            exposure_times.append(exptime)
+        if exptime <= 1:
+            low_exposure_files.append(file)
+        print(f"{file}: Exposure time = {exptime}")
+
+# Display unique exposure times
+print(f"Exposure times found: {set(exposure_times)} seconds")
+print(f"List of low exposure files: {low_exposure_files}")
+
+# %%
+
+# =============================================================================
+# Step 5: Evaluate Linearity
+# =============================================================================
+
+# We will calculate the average pixel values for each Dark Frame
+# and plot them against the exposure times. If the signal behaves
+# linearly, a linear relationship should be observed in the graph.
+
+# Calculate the mean signal for each exposure time
+means = []
+exposure_times = []
+for file in fits_files:
+    file_path = os.path.join(folder_path, file)
+    with fits.open(file_path) as hdul:
+        data = hdul[0].data
+        exptime = hdul[0].header.get('EXPTIME', None)
+        if exptime is not None:
+            means.append(np.mean(data))
+            exposure_times.append(exptime)
+
+# Sort by exposure time
+exposure_times, means = zip(*sorted(zip(exposure_times, means)))
+
+# Plot the relationship between exposure time and mean signal
+plt.figure(figsize=(8, 6))
+plt.scatter(exposure_times, means, color='purple', label="Data")
+plt.title("Relationship between Exposure Time and Mean Signal")
+plt.xlabel("Exposure Time (s)")
+plt.ylabel("Mean Signal (ADU)")
+plt.grid()
+plt.legend()
+plt.show()
+
+# The graph shows the expected linear trend between exposure time
+# and the mean signal, except for an outlier at the start
+# (near the lowest exposure times). This could be due to a corrupted
+# FITS file or anomalies during the acquisition of that Dark Frame.
+
+# %%
+
+# =============================================================================
+# Step 6: Correct the Outlier
+# =============================================================================
+
+# We will identify and filter the anomalous value to ensure it doesn't
+# affect the linearity analysis.
+
+# Detect the outlier (deviation from the linear trend)
+deviations = np.abs(means - np.mean(means))
+deviation_threshold = np.percentile(deviations, 95)  # Adjust threshold as needed
+
+# Filter the data
+filtered_times = []
+filtered_means = []
+for t, m, d in zip(exposure_times, means, deviations):
+    if d < deviation_threshold:
+        filtered_times.append(t)
+        filtered_means.append(m)
+
+# Plot the corrected data
+plt.figure(figsize=(8, 6))
+plt.scatter(filtered_times, filtered_means, color='purple', label="Filtered Data")
+plt.title("Linear Relationship (Filtered Outlier)")
+plt.xlabel("Exposure Time (s)")
+plt.ylabel("Mean Signal (ADU)")
+plt.grid()
+plt.legend()
+plt.show()
+
+# %%
+
+
+from astropy.stats import sigma_clip
+
+
+sample_clipped = sigma_clip(bias_frames, sigma=5)
+print(f"bias mean is {sample_clipped.mean()}")
+print(f"bias std is {sample_clipped.std()}")
+
+# %%
+
+# To plot the final graph
+
+# Adjustment removing initial points (using polyfit)
+# Remove the first 10 elements (which visually correspond to the non-linear zone)
+final_times = []
+for tt in filtered_times:
+    if len(final_times) == 0 or tt != final_times[-1]:
+        final_times.append(tt)
+    else:
+        continue
+
+final_means = []
+final_medians = []
+final_times2 = []
+for t_f in final_times:
+    means_t_f = []
+    medians_t_f = []
+    for file in fits_files:
+        file_path = os.path.join(folder_path, file)
+        with fits.open(file_path) as hdul:
+            exptime = hdul[0].header.get('EXPTIME', None)
+            if exptime is not None and exptime == t_f:
+                data = hdul[0].data
+                data = data[131:2552, :]
+                means_t_f.append(np.mean(data))
+                medians_t_f.append(np.median(data))
+                final_means.append(np.mean(data))
+                final_medians.append(np.median(data))
+                final_times2.append(exptime)
+
+filtered_linear_times = final_times2[10:]
+filtered_linear_means = final_means[10:]
+filtered_linear_times = np.array(filtered_linear_times)
+fit2 = np.polyfit(filtered_linear_times, filtered_linear_means, 1)
+slope_fit2 = fit2[0]
+intercept_fit2 = fit2[1]
+corr_coeff = np.corrcoef(filtered_linear_times, filtered_linear_means)[0, 1]
+print(f"The correlation coefficient for the mean is {corr_coeff:.8f}")
+
+filtered_linear_medians = final_medians[10:]
+fit3 = np.polyfit(filtered_linear_times, filtered_linear_medians, 1)
+slope_fit3 = fit3[0]
+intercept_fit3 = fit3[1]
+corr_coeff = np.corrcoef(filtered_linear_times, filtered_linear_medians)[0, 1]
+print(f"The correlation coefficient for the median is {corr_coeff:.8f}")
+
+line = slope_fit2 * filtered_linear_times + intercept_fit2
+line2 = slope_fit3 * filtered_linear_times + intercept_fit3
+plt.figure(figsize=(8, 6))
+
+# Mean Dark Data and linear fit
+plt.scatter(filtered_linear_times, filtered_linear_means, color='blue', marker="*", label="Mean Dark")
+plt.plot(filtered_linear_times, line, color='blue', linestyle='-', linewidth=2)
+plt.scatter(filtered_linear_times, filtered_linear_medians, color='red', marker="^", label="Median Dark")
+plt.plot(filtered_linear_times, line2, color='red', linestyle='-', linewidth=2)
+
+# Adjust presentation
+plt.xlim(-50, max(filtered_times) + 100)
+plt.ylim(min(filtered_linear_means) - 20, max(filtered_linear_means) + 20)
+plt.xlabel("Exposure Time [s]", fontsize=12)
+plt.ylabel("Mean Dark Current [ADU]", fontsize=12)
+plt.axhline(y=intercept_fit2, color='blue', linestyle='--', label="Mean Dark Intercept")
+plt.axhline(y=intercept_fit3, color='red', linestyle='--', label="Median Dark Intercept")
+plt.axhline(y=np.mean(sample_clipped.mean()), color="k", linestyle='--', label="Bias σ Clipped")
+plt.legend(fontsize=12)
+plt.grid(alpha=0.5)
+plt.show()
+
+# %%
+
+gain = 0.37
+dark_current1 = slope_fit2 * gain
+print(dark_current1)
+
+dark_current2 = slope_fit3 * gain
+print(dark_current2)
